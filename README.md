@@ -59,7 +59,7 @@ Index_encoder_384_c2i  |  [Index_encoder_384_c2i](https://huggingface.co/maifoun
 For watermark verification of class-conditional images, you can run:
 ```
 python verification.py --vq-ckpt path/vq_ds16_c2i.pt --mapping-save-path path/codebook_index_mapping_knn10_mwpm_c2i.json --pairs-save-path path/codebook_pairs_knn10_mwpm_c2i.json --index-encoder path/encoder_finetuned_target_zq_epoch_70.pt --image-directory path/Gen_Image_c2i/100%
-```_
+```
 ### Text-conditional image generation Watermark
 For watermark verification of text-conditional images, you can run:
 ```
