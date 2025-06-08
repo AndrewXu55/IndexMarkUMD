@@ -1,7 +1,7 @@
 <h1 align="center">IndexMark: Training-Free Watermarking for Autoregressive Image Generation</h1>
 
 <p align="center">
-          📑 <a href="https://arxiv.org/pdf/2505.14673">Paper</a> &nbsp&nbsp | &nbsp&nbsp 📖 <a href="https://www.maifoundations.com/blog/indexmark/">Blog</a> &nbsp&nbsp 
+          🤗 <a href="https://huggingface.co/maifoundations/IndexMark">Hugging Face</a>&nbsp&nbsp | &nbsp&nbsp 📑 <a href="https://arxiv.org/pdf/2505.14673">Paper</a> &nbsp&nbsp | &nbsp&nbsp 📖 <a href="https://www.maifoundations.com/blog/indexmark/">Blog</a> &nbsp&nbsp 
 </p>
 <p align="center">
 <img src="assets/pipeline.png" width=95%>
@@ -10,6 +10,7 @@
 This repo is the official implementation of the paper 'Training-Free Watermarking for Autoregressive Image Generation'.
 
 ## 📰 News
+* **`[2025/06/03]`:**🔥**Model checkpoints are available at [[🤗HuggingFace](https://huggingface.co/maifoundations/IndexMark)].**
 * **`[2025/05/20]`:**🔥**We have released our paper [[Arxiv](https://arxiv.org/pdf/2505.14673)].**
 
 ## ✈️ About
