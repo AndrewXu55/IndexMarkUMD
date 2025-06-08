@@ -48,7 +48,7 @@ python generation.py --t5-path path/t5-ckpt --gpt-ckpt path/t2i_XL_stage2_512.pt
 
 ## 🚀 Watermark verification
 ### Index Encoder
-Method | params | tokens | rFID (256x256) | weight
+Method | weight
 --- |:---:
 Index_encoder_256 | [Index_encoder_256](https://huggingface.co/maifoundations/IndexMark/resolve/main/Index_encoder_256.pt) 
 Index_encoder_512 |  [Index_encoder_512](https://huggingface.co/maifoundations/IndexMark/resolve/main/Index_encoder_512.pt) 
