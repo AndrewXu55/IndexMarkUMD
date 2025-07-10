@@ -79,10 +79,10 @@ python verification.py --vq-ckpt path/vq_ds16_t2i.pt --mapping-save-path path/co
 We have trained specific IndexMark models for different resolutions, and you can also only use an IndexMark for a specific resolution.
 
 ### Attack Verification
+Please place the watermarked images and non-watermarked images in the `path/1000_w` and `path/1000` folders respectively.
 ```
 python attack_val.py --vq-ckpt path/vq_ds16_xxx.pt --mapping-save-path path/codebook_index_mapping_knn10_mwpm.json --pairs-save-path path/codebook_pairs_knn10_mwpm.json --ft-pt-path path/Index_encoder.pt --WATERMARK-THRESHOLD 0.615 --chosen-attack jpeg --jpeg-attack-quality 70 --Watermarked-dir path/1000_w --Not-Watermarked-dir 'path/1000'
 ```
-Please place the watermarked images and non-watermarked images in the `path/1000_w` and `path/1000` folders respectively.
 
 ## ⚡ License
 The majority of this project is licensed under MIT License. Portions of the project are available under separate license of referred projects, detailed in corresponding files.
