@@ -7,7 +7,7 @@
 <img src="assets/pipeline.png" width=95%>
 <p>
 
-This repo is the official implementation of the paper '[Training-Free Watermarking for Autoregressive Image Generation](https://arxiv.org/pdf/2505.14673)'.
+This repo is the official implementation of the paper '[Training-Free Watermarking for Autoregressive Image Generation](https://arxiv.org/pdf/2505.14673)'. If you like this repo, don't forget to give a star, and if possible cite this paper. Many thanks!
 
 ## 📰 News
 * **`[2025/06/03]`:**🔥**Model checkpoints are available at [[🤗HuggingFace](https://huggingface.co/maifoundations/IndexMark)].**
