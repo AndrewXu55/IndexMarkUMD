@@ -55,18 +55,62 @@ Index_encoder_512 |  [Index_encoder_512](https://huggingface.co/maifoundations/I
 Index_encoder_256_c2i |  [Index_encoder_256_c2i](https://huggingface.co/maifoundations/IndexMark/resolve/main/Index_encoder_256_c2i.pt) 
 Index_encoder_384_c2i  |  [Index_encoder_384_c2i](https://huggingface.co/maifoundations/IndexMark/resolve/main/Index_encoder_384_c2i.pt) 
 
+### Code
+
+**STEP1: Data Preprocessing**
+We use the validation data from ImageNet for training.
+```
+python Index_encoder/preprocess_for_finetuning_zq.py \
+    --output-dir path/preprocess_data \
+    --image-dir path/imagenet/val_image \
+    --vq-ckpt path/vq_ds16_xxx.pt \
+    --image-size xxx
+```
+**STEP2: Index Encoder Training**
+```
+python ft2_2loss.py \
+    --preprocessed-dir path/preprocess_data \
+    --vq-ckpt path/vq_ds16_xxx.pt \
+    --output-dir path/encoder \
+    --log-file path/training_loss.log
+
+```
 ### Class-Conditional Image Generation Watermark
 For watermark verification of class-conditional images, you can run:
 ```
-python verification.py --vq-ckpt path/vq_ds16_c2i.pt --mapping-save-path path/codebook_index_mapping_knn10_mwpm_c2i.json --pairs-save-path path/codebook_pairs_knn10_mwpm_c2i.json --index-encoder path/encoder_finetuned_target_zq_epoch_70.pt --image-directory path/Gen_Image_c2i/100%
+python verification.py \
+    --vq-ckpt path/vq_ds16_c2i.pt \
+    --mapping-save-path path/codebook_index_mapping_knn10_mwpm_c2i.json \
+    --pairs-save-path path/codebook_pairs_knn10_mwpm_c2i.json \
+    --index-encoder path/Index_encoder_xxx.pt \
+    --image-directory path/Gen_Image_c2i/100%
 ```
 ### Text-conditional image generation Watermark
 For watermark verification of text-conditional images, you can run:
 ```
-python verification.py --vq-ckpt path/vq_ds16_t2i.pt --mapping-save-path path/codebook_index_mapping_knn10_mwpm.json --pairs-save-path path/codebook_pairs_knn10_mwpm.json --index-encoder path/encoder_finetuned_target_zq_epoch_70.pt --image-directory path/Gen_Image/100%-256
+python verification.py \
+    --vq-ckpt path/vq_ds16_t2i.pt \
+    --mapping-save-path path/codebook_index_mapping_knn10_mwpm.json \
+    --pairs-save-path path/codebook_pairs_knn10_mwpm.json \
+    --index-encoder path/Index_encoder_xxx_c2i.pt \
+    --image-directory path/Gen_Image/100%-256
 ```
 We have trained specific IndexMark models for different resolutions, and you can also only use an IndexMark for a specific resolution.
 
+### Attack Verification
+```
+python attack_val.py \
+    --vq-ckpt path/vq_ds16_xxx.pt \
+    --mapping-save-path path/codebook_index_mapping_knn10_mwpm.json \
+    --pairs-save-path path/codebook_pairs_knn10_mwpm.json \
+    --ft-pt-path path/Index_encoder.pt \
+    --WATERMARK-THRESHOLD 0.615 \
+    --chosen-attack jpeg \
+    --jpeg-attack-quality 70 \
+    --Watermarked-dir path/1000_w \
+    --Not-Watermarked-dir 'path/1000'
+```
+Translation: Please place the watermarked images and non-watermarked images in the `path/1000_w` and `path/1000` folders respectively.
 ## ⚡ License
 The majority of this project is licensed under MIT License. Portions of the project are available under separate license of referred projects, detailed in corresponding files.
 
