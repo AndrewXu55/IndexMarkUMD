@@ -55,9 +55,10 @@ Index_encoder_512 |  [Index_encoder_512](https://huggingface.co/maifoundations/I
 Index_encoder_256_c2i |  [Index_encoder_256_c2i](https://huggingface.co/maifoundations/IndexMark/resolve/main/Index_encoder_256_c2i.pt) 
 Index_encoder_384_c2i  |  [Index_encoder_384_c2i](https://huggingface.co/maifoundations/IndexMark/resolve/main/Index_encoder_384_c2i.pt) 
 
-### Code
+### Train
 
 **STEP1: Data Preprocessing**
+
 We use the validation data from ImageNet for training.
 ```
 python Index_encoder/preprocess_for_finetuning_zq.py --output-dir path/preprocess_data --image-dir path/imagenet/val_image --vq-ckpt path/vq_ds16_xxx.pt --image-size xxx
