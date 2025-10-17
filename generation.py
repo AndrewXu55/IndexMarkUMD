@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
+from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 from torchvision.utils import save_image
 
@@ -34,7 +35,8 @@ class HierarchicalCodebook:
     def __init__(self, codebook_vectors, replacement_ratio=1.0,
                  mapping_save_path="codebook_index_mapping.json",
                  pairs_save_path="codebook_pairs.json",
-                 load_mapping=False, load_pairs=False,device="cuda"):
+                 load_mapping=False, load_pairs=False,device="cuda",
+                 pairing_method="Default"):
         
         self.codebook = codebook_vectors
         self.codebook_size = codebook_vectors.shape[0]
@@ -81,7 +83,10 @@ class HierarchicalCodebook:
             print("Calculate the pairing list and index mapping.")
 
         if calculation_needed:
-            self._build_pairs()             
+            if pairing_method == "Default":
+                self._build_pairs()             
+            else:
+                self.build_pairs_clustering()
             if not self.pairs:
                 print("Error: Pairing build failed or resulted in an empty pairing list. Cannot continue.")
                 raise RuntimeError("Failed to build codebook pairing.")
@@ -162,6 +167,87 @@ class HierarchicalCodebook:
 
         print("\nAnalyzing the similarity within the formed pairs ...")
         self._analyze_pair_similarities_direct()
+
+    def build_pairs_clustering(self, k=1000, balance_threshold=0.05):
+        """
+        Build pairs using K-means clustering instead of greedy pairing using cosine similarity.
+        
+        Args:
+            k: Number of clusters
+            balance_threshold: Maximum allowed deviation from 50/50 split
+        """
+        
+        print(f"Building pairs using clustering method with k={k} clusters...")
+        
+        # Step 1: Normalize vectors and handle zero-norm vectors
+        try:
+            norms = np.linalg.norm(self.codebook, axis=1, keepdims=True)
+            zero_norm_mask = (norms < 1e-10).flatten()
+            if np.any(zero_norm_mask):
+                print(f"Warning: {np.sum(zero_norm_mask)} zero norm vectors found. They will be assigned randomly.")
+                norms[zero_norm_mask.reshape(-1, 1)] = 1.0  # Prevent division by zero
+            norm_codebook = self.codebook / norms
+        except MemoryError:
+            print("Error: Insufficient memory while normalizing vectors.")
+            raise
+        
+        # Step 2: Perform K-means clustering
+        print(f"Performing K-means clustering into {k} clusters...")
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10, max_iter=300)
+        cluster_labels = kmeans.fit_predict(norm_codebook)
+        
+        # Step 3: Look at bin count per cluster
+        cluster_sizes = np.bincount(cluster_labels, minlength=k)
+        print(f"Cluster sizes - Min: {cluster_sizes.min()}, Max: {cluster_sizes.max()}, Mean: {cluster_sizes.mean():.2f}")
+        
+        # Step 4: Assign clusters to red/green to achieve ~50/50 balance
+        print("Assigning clusters to red/green groups...")
+        sorted_indices = np.argsort(cluster_sizes)[::-1]
+        red_green_assignment = np.zeros(k, dtype=int)
+        red_count = 0
+        green_count = 0
+        # Greedy assignment: assign each cluster to the group with fewer tokens
+        for cluster_id in sorted_indices:
+            size = cluster_sizes[cluster_id]
+            if red_count <= green_count:
+                red_green_assignment[cluster_id] = 0  # Red
+                red_count += size
+            else:
+                red_green_assignment[cluster_id] = 1  # Green
+                green_count += size
+        token_assignments = np.array([red_green_assignment[label] for label in cluster_labels])
+        
+        # Step 5: Analyze the results and the balance of red and green tokens
+        print(f"\nClustering-based pairing completed.")
+        print(f"  Total pairs formed: {len(self.pairs)}")
+        print(f"  Unassigned indices: {len(self.unassigned_indices)}")
+        num_red = np.sum(token_assignments == 0)
+        num_green = np.sum(token_assignments == 1)
+        total = len(token_assignments)
+        red_pct = num_red / total
+        green_pct = num_green / total
+        imbalance = abs(red_pct - 0.5)
+        print(f"\nFinal token distribution:")
+        print(f"- Red tokens: {num_red} ({red_pct * 100:.2f}%)")
+        print(f"- Green tokens: {num_green} ({green_pct * 100:.2f}%)")
+        print(f"- Imbalance: {imbalance * 100:.2f}%")
+        if abs(red_pct - 0.5) > balance_threshold:
+            print(f"Imbalance EXCEEDS threshold: {balance_threshold*100}%!")
+        
+        if hasattr(self, 'pairs_save_path') and self.pairs_save_path:
+            self.save_pairs(self.pairs_save_path)
+        
+        print("\nAnalyzing pair similarities...")
+        self._analyze_pair_similarities_direct()
+        
+        self.token_red_green_assignment = token_assignments
+        self.cluster_labels = cluster_labels
+        
+        del norm_codebook, kmeans
+        gc.collect()
+
+    def build_pairs_random(self):
+        pass
 
     def _analyze_pair_similarities_direct(self):
         """Directly using codebook vectors to analyze the similarity within the formed pairs."""
