@@ -49,8 +49,15 @@ def top_k_top_p_filtering(
     return logits
 
 
-def sample(logits, temperature: float=1.0, top_k: int=0, top_p: float=1.0, sample_logits=True, index_mapping=None):        
+def sample(logits, temperature: float=1.0, top_k: int=0, top_p: float=1.0, sample_logits=True, index_mapping=None, green_list=None, delta=0.0):
     logits = logits[:, -1, :] / max(temperature, 1e-5)
+
+    # Boost green token logits if green_list is provided (fixed per image)
+    if green_list is not None and delta > 0:
+        # Assume green_list is already a tensor on the correct device
+        # to avoid expensive device transfers on every token
+        logits[:, green_list] += delta
+
     if top_k > 0 or top_p < 1.0:
         logits = top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)
     probs = F.softmax(logits, dim=-1)
@@ -88,7 +95,7 @@ def logits_to_probs(logits, temperature: float = 1.0, top_p: float=1.0, top_k: i
     return probs
 
 
-def prefill(model, cond_idx: torch.Tensor, input_pos: torch.Tensor, cfg_scale: float, index_mapping=None, **sampling_kwargs):
+def prefill(model, cond_idx: torch.Tensor, input_pos: torch.Tensor, cfg_scale: float, index_mapping=None, green_list=None, delta=0.0, **sampling_kwargs):
     if cfg_scale > 1.0:
         logits, _ = model(None, cond_idx, input_pos)
         logits_combined = logits
@@ -100,17 +107,18 @@ def prefill(model, cond_idx: torch.Tensor, input_pos: torch.Tensor, cfg_scale: f
             logits = logits_combined
     else:
         logits, _ = model(None, cond_idx, input_pos)
-    return sample(logits, index_mapping=index_mapping, **sampling_kwargs)
+    # Don't apply watermarking during prefill
+    return sample(logits, index_mapping=index_mapping, green_list=None, delta=0.0, **sampling_kwargs)
 
 
-def decode_one_token(model, x: torch.Tensor, input_pos: torch.Tensor, cfg_scale: float, cfg_flag: bool, index_mapping=None, **sampling_kwargs):
+def decode_one_token(model, x: torch.Tensor, input_pos: torch.Tensor, cfg_scale: float, cfg_flag: bool, index_mapping=None, green_list=None, delta=0.0, **sampling_kwargs):
     assert input_pos.shape[-1] == 1
     if cfg_scale > 1.0:
         x_combined = torch.cat([x, x])
         logits, _ = model(x_combined, cond_idx=None, input_pos=input_pos)
         logits_combined = logits
         if logits_combined.shape[0] >= 2:
-            cond_logits, uncond_logits = torch.split(logits_combined, len(logits_combined) // 2, dim=0) 
+            cond_logits, uncond_logits = torch.split(logits_combined, len(logits_combined) // 2, dim=0)
             if cfg_flag:
                 logits = uncond_logits + (cond_logits - uncond_logits) * cfg_scale
             else:
@@ -120,12 +128,12 @@ def decode_one_token(model, x: torch.Tensor, input_pos: torch.Tensor, cfg_scale:
             logits = logits_combined
     else:
         logits, _ = model(x, cond_idx=None, input_pos=input_pos)
-    return sample(logits, index_mapping=index_mapping, **sampling_kwargs)
+    return sample(logits, index_mapping=index_mapping, green_list=green_list, delta=delta, **sampling_kwargs)
 
 
 def decode_n_tokens(
-    model, cur_token: torch.Tensor, input_pos: torch.Tensor, num_new_tokens: int, 
-    cfg_scale: float, cfg_interval: int, index_mapping=None,
+    model, cur_token: torch.Tensor, input_pos: torch.Tensor, num_new_tokens: int,
+    cfg_scale: float, cfg_interval: int, index_mapping=None, green_list=None, delta=0.0,
     **sampling_kwargs):
     new_tokens, new_confidences = [], []
     cfg_flag = True
@@ -134,18 +142,19 @@ def decode_n_tokens(
             if cfg_interval > -1 and i > cfg_interval:
                 cfg_flag = False
             next_token, token_confidence = decode_one_token(
-                model, cur_token, input_pos, cfg_scale, cfg_flag, index_mapping=index_mapping, **sampling_kwargs
+                model, cur_token, input_pos, cfg_scale, cfg_flag, index_mapping=index_mapping,
+                green_list=green_list, delta=delta, **sampling_kwargs
             )
             input_pos += 1
             new_tokens.append(next_token.clone())
             new_confidences.append(token_confidence.clone())
             cur_token = next_token.view(-1, 1)
-    
+
     return new_tokens, new_confidences
 
 
 @torch.no_grad()
-def generate(model, cond, max_new_tokens, emb_masks=None, cfg_scale=1.0, cfg_interval=-1, confidence_threshold=0.8, index_mapping=None, **sampling_kwargs):
+def generate(model, cond, max_new_tokens, emb_masks=None, cfg_scale=1.0, cfg_interval=-1, confidence_threshold=0.8, index_mapping=None, green_list=None, delta=0.0, **sampling_kwargs):
     if model.model_type == 'c2i':
         if cfg_scale > 1.0:
             cond_null = torch.ones_like(cond) * model.num_classes
@@ -187,12 +196,12 @@ def generate(model, cond, max_new_tokens, emb_masks=None, cfg_scale=1.0, cfg_int
     confidences = torch.zeros((max_batch_size, T_new, 2), dtype=torch.float, device=device) 
 
     input_pos = torch.arange(0, T, device=device)
-    next_token, first_confidence = prefill(model, cond_combined, input_pos, cfg_scale, index_mapping=index_mapping, **sampling_kwargs)
+    next_token, first_confidence = prefill(model, cond_combined, input_pos, cfg_scale, index_mapping=index_mapping, green_list=green_list, delta=0.0, **sampling_kwargs)
     seq[:, T:T+1] = next_token
     confidences[:, T:T+1] = first_confidence
 
     input_pos = torch.tensor([T], device=device, dtype=torch.int)
-    generated_tokens, token_confidences = decode_n_tokens(model, next_token, input_pos, max_new_tokens-1, cfg_scale, cfg_interval, index_mapping=index_mapping, **sampling_kwargs)
+    generated_tokens, token_confidences = decode_n_tokens(model, next_token, input_pos, max_new_tokens-1, cfg_scale, cfg_interval, index_mapping=index_mapping, green_list=green_list, delta=delta, **sampling_kwargs)
     seq[:, T+1:] = torch.cat(generated_tokens, dim=1)
     
     for i, conf in enumerate(token_confidences):
