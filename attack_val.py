@@ -8,15 +8,17 @@ import sys
 import time
 import traceback
 from typing import Union, Tuple, List, Optional
-
+from tqdm import tqdm
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image, ImageFilter
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, roc_curve
 from sklearn.metrics.pairwise import cosine_similarity
 from torchvision.utils import save_image
 import torchvision.transforms as transforms
+from scipy import stats
+import hashlib
 
 try:
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -25,7 +27,6 @@ except NameError:
 # sys.path.append(current_dir)
 sys.path.append("/root/autodl-tmp/LlamaGen")
 
-from hc import HierarchicalCodebook
 from tokenizer.tokenizer_image.vq_model import VQ_models
 from language.t5 import T5Embedder
 from autoregressive.models.gpt import GPT_models
@@ -46,7 +47,16 @@ def set_random_seed(seed):
     np.random.seed(seed)
 
 
-def image_distortion(img_pil, seed, attack, jpeg_quality=70):
+def image_distortion(
+    img_pil,
+    seed,
+    attack,
+    jpeg_quality=70,
+    blur_kernel_size=11,
+    noise_std_fraction=0.01,
+    color_jitter_brightness=0.5,
+    crop_scale=0.75,
+):
     img_distorted = img_pil.copy()
 
     if attack == "jpeg":
@@ -59,26 +69,30 @@ def image_distortion(img_pil, seed, attack, jpeg_quality=70):
     elif attack == "cropping":
         set_random_seed(seed)
         crop_transform = transforms.RandomResizedCrop(
-            img_distorted.size, scale=(0.75, 0.75), ratio=(1.0, 1.0)
+            img_distorted.size, scale=(crop_scale, crop_scale), ratio=(1.0, 1.0)
         )
         img_distorted = crop_transform(img_distorted)
 
     elif attack == "blurring":
-        blur_transform = transforms.GaussianBlur(kernel_size=11, sigma=1.0)
+        # Ensure kernel size is odd
+        if blur_kernel_size % 2 == 0:
+            blur_kernel_size += 1
+        blur_transform = transforms.GaussianBlur(
+            kernel_size=blur_kernel_size, sigma=(blur_kernel_size - 1) / 6
+        )
         img_distorted = blur_transform(img_distorted)
 
     elif attack == "noise":
         img_np = np.array(img_distorted).astype(np.float32)
         set_random_seed(seed)
-        noise_std_dev_fraction = 0.01
-        g_noise = np.random.normal(0, noise_std_dev_fraction * 255.0, img_np.shape)
+        g_noise = np.random.normal(0, noise_std_fraction * 255.0, img_np.shape)
         noisy_img_np = img_np + g_noise
         noisy_img_np = np.clip(noisy_img_np, 0, 255)
         img_distorted = Image.fromarray(noisy_img_np.astype(np.uint8))
 
     elif attack == "color_jitter":
         set_random_seed(seed)
-        jitter_transform = transforms.ColorJitter(brightness=0.5)
+        jitter_transform = transforms.ColorJitter(brightness=color_jitter_brightness)
         img_distorted = jitter_transform(img_distorted)
 
     elif attack == "random_erase":
@@ -133,15 +147,75 @@ def load_pil_image_to_tensor(pil_image, target_device="cpu"):
     return reconstructed_tensor
 
 
-def green_check(hc, indices_orig):
-    green = 0
-    red = 0
-    for i in indices_orig:
-        if i.item() in hc.green_list:
-            green = green + 1
-        else:
-            red = red + 1
-    return green / (green + red)
+def load_assignment_json(image_path):
+    """
+    Load the assignment JSON file for a given image.
+
+    Args:
+        image_path: Path to the image file
+
+    Returns:
+        dict: Assignment data including algorithm, red_list, green_list, etc.
+              Returns None if file not found.
+    """
+    # Get the directory and filename
+    image_dir = os.path.dirname(image_path)
+    image_filename = os.path.basename(image_path)
+    image_name = os.path.splitext(image_filename)[0]
+
+    # Look for the JSON file in assignments subdirectory
+    json_path = os.path.join(image_dir, "assignments", f"{image_name}.json")
+
+    if not os.path.exists(json_path):
+        print(f"Warning: Assignment JSON not found at {json_path}")
+        return None
+
+    try:
+        with open(json_path, "r") as f:
+            assignment_data = json.load(f)
+        return assignment_data
+    except Exception as e:
+        print(f"Error loading assignment JSON from {json_path}: {e}")
+        return None
+
+
+def compute_pvalue_kgw(indices, green_list, h, gamma):
+    """
+    Compute p-value for KGW watermark detection using pre-defined green list.
+
+    Args:
+        indices: List/array of generated token indices
+        green_list: Set or list of green token indices
+        h: Context window size (for current experiments, h=0)
+        gamma: Fraction of tokens marked as green
+
+    Returns:
+        p_value: Statistical significance (lower = more likely watermarked)
+        green_count: Number of green tokens detected
+        total_checked: Total tokens checked (T - h)
+    """
+    T = len(indices)
+    if T <= h:
+        return 1.0, 0, 0
+
+    green_set = set(green_list) if not isinstance(green_list, set) else green_list
+    green_count = 0
+
+    # For each token from position h onwards, check if it's in the green list
+    # Note: h=0 for current experiments, so we check all tokens
+    for i in range(h, T):
+        if indices[i] in green_set:
+            green_count += 1
+
+    # Total tokens checked
+    total_checked = T - h
+
+    # Compute p-value using binomial test
+    # Under H0 (no watermark), S ~ Binomial(T-h, gamma)
+    # p-value = P(X >= S | X ~ Binomial(T-h, gamma))
+    p_value = stats.binom.sf(green_count - 1, total_checked, gamma)
+
+    return p_value, green_count, total_checked
 
 
 def tensor_to_image(tensor):
@@ -360,22 +434,80 @@ if __name__ == "__main__":
         type=str,
         default="/cmlscratch/anirudhs/hub/Index_encoder_512.pt",
     )
+    parser.add_argument(
+        "--h",
+        type=int,
+        default=0,
+        help="Context window size for KGW watermark detection (default: 0).",
+    )
+    parser.add_argument(
+        "--pvalue-threshold",
+        type=float,
+        default=0.01,
+        help="P-value threshold for watermark detection (lower = stricter).",
+    )
+    parser.add_argument(
+        "--algorithm",
+        type=str,
+        default="pairwise",
+        help="Override algorithm type (otherwise read from JSON). Options: pairwise, random, clustering, spectral, spectral-clustering",
+    )
     parser.add_argument("--WATERMARK-THRESHOLD", type=float, default=0.615)
     parser.add_argument("--target-image-size", type=int, default=512)
     parser.add_argument(
         "--chosen-attack",
         type=str,
-        default="cropping",
+        default="blurring",
         choices=["jpeg", "cropping", "blurring", "noise", "color_jitter", "none"],
     )
     parser.add_argument("--jpeg-attack-quality", type=int, default=70)
     parser.add_argument(
-        "--Watermarked-dir", type=str, default="images/Gen_Image/100%-512"
+        "--blur-kernel-size",
+        type=int,
+        default=19,
+        help="Kernel size for Gaussian blur attack (must be odd)",
     )
     parser.add_argument(
-        "--Not-Watermarked-dir", type=str, default="images/Gen_Image/50%-512"
+        "--noise-std-fraction",
+        type=float,
+        default=0.01,
+        help="Standard deviation fraction for Gaussian noise attack (multiplied by 255)",
+    )
+    parser.add_argument(
+        "--color-jitter-brightness",
+        type=float,
+        default=0.5,
+        help="Brightness parameter for color jitter attack",
+    )
+    parser.add_argument(
+        "--crop-scale",
+        type=float,
+        default=0.75,
+        help="Scale for random crop attack (0.0-1.0)",
+    )
+    parser.add_argument(
+        "--Watermarked-dir",
+        type=str,
+        default="/cmlscratch/anirudhs/graph_watermark/images/t2i_experiments/random-delta2.0-512",
+    )
+    parser.add_argument(
+        "--Not-Watermarked-dir",
+        type=str,
+        default="/cmlscratch/anirudhs/graph_watermark/images/t2i_experiments/random-baseline-512",
     )
     parser.add_argument("--distortion-seed", type=int, default=123)
+    parser.add_argument(
+        "--results-output",
+        type=str,
+        default="attack_validation_results.json",
+        help="Path to save attack validation results as JSON",
+    )
+    parser.add_argument(
+        "--fpr-threshold",
+        type=float,
+        default=1.0,
+        help="FPR threshold (in percentage) for computing TPR @ FPR metric (default: 1.0 for 1%%)",
+    )
 
     args, _ = parser.parse_known_args()
 
@@ -392,7 +524,6 @@ if __name__ == "__main__":
             "Warning: BF16 precision was requested, but is not supported on this GPU. Falling back to FP32."
         )
         args.precision = "none"
-    hc = None
     codebook_weights = None
 
     print("Loading VQ model...")
@@ -447,14 +578,6 @@ if __name__ == "__main__":
         vq_model.quantize.embedding.weight.data.cpu().numpy().astype(np.float32)
     )
     print(f"Codebook weights extracted (shape: {codebook_weights.shape})")
-    hc = HierarchicalCodebook(
-        codebook_vectors=codebook_weights,
-        replacement_ratio=args.replacement_ratio,
-        mapping_save_path=args.mapping_save_path,
-        pairs_save_path=args.pairs_save_path,
-        load_mapping=True,
-        load_pairs=True,
-    )
     #### Begin validation
 
     directories_to_process = {
@@ -467,6 +590,9 @@ if __name__ == "__main__":
     all_calculated_ratios = []
     processed_image_count = 0
     total_images_to_process = 0
+
+    # Store detailed results for each image
+    image_results = []
 
     for image_directory in directories_to_process:
         if not os.path.isdir(image_directory):
@@ -506,18 +632,46 @@ if __name__ == "__main__":
         ]
         print(f"  Found {len(image_files)} images.")
 
-        for idx, filename in enumerate(image_files):
+        for idx, filename in tqdm(enumerate(image_files)):
             image_path = os.path.join(image_directory, filename)
             current_seed = args.distortion_seed + idx
 
             try:
+                # Load assignment JSON to determine algorithm and green/red lists
+                assignment_data = load_assignment_json(image_path)
+
+                if assignment_data is None:
+                    print(f"Warning: No assignment data for {filename}. Skipping.")
+                    continue
+
+                # Determine algorithm
+                algorithm = (
+                    args.algorithm
+                    if args.algorithm
+                    else assignment_data.get("algorithm", "unknown")
+                )
+
                 original_pil_image = Image.open(image_path).convert("RGB")
 
+                # Get green/red lists from assignment data
+                green_list_data = assignment_data.get("green_list", [])
+                red_list_data = assignment_data.get("red_list", [])
+
+                # Calculate gamma from actual green/red lists
+                total_vocab = len(green_list_data) + len(red_list_data)
+                gamma = len(green_list_data) / total_vocab if total_vocab > 0 else 0.5
+                green_list = set(green_list_data)
+
+                # Apply attack/distortion
                 distorted_pil_image = image_distortion(
                     original_pil_image,
                     seed=current_seed,
                     attack=args.chosen_attack,
                     jpeg_quality=args.jpeg_attack_quality,
+                    blur_kernel_size=args.blur_kernel_size,
+                    noise_std_fraction=args.noise_std_fraction,
+                    color_jitter_brightness=args.color_jitter_brightness,
+                    crop_scale=args.crop_scale,
                 )
 
                 x_input = load_pil_image_to_tensor(
@@ -525,43 +679,61 @@ if __name__ == "__main__":
                 )
 
                 with torch.no_grad():
-                    if args.chosen_attack == "cropping":
-                        rate_list = []
-                        crop_size = (x_input.size(2), x_input.size(3))
-                        crop_list, crop_index = place_crop_and_get_indices(
-                            args.target_image_size, x_input, device
-                        )
-                        for idx, i in enumerate(crop_list):
-                            latent_orig, _, [_, _, indices_i] = vq_model.encode(i)
-                            indices_orig = indices_i.flatten()
-                            rate = green_check(hc, indices_i[crop_index[idx]])
-                            rate_list.append(rate)
-                            current_ratio = max(rate_list)
-                            if current_ratio > args.WATERMARK_THRESHOLD:
-                                break
-                    else:
-                        latent_orig, _, misc = vq_model.encode(x_input)
-                        indices_orig = misc[2]
-                        indices_orig = indices_orig.flatten()
+                    # Extract indices from distorted image
+                    latent_orig, _, misc = vq_model.encode(x_input)
+                    indices_orig = misc[2]
+                    indices_orig = indices_orig.flatten()
+                    indices_list = indices_orig.cpu().numpy().tolist()
 
-                        white = 0
-                        red = 0
-                        total_indices = 0
-                        for i in indices_orig:
-                            idx_item = i.item()
-                            if idx_item in hc.green_list:
-                                white += 1
-                            else:
-                                red += 1
-                            total_indices += 1
+                    p_value, green_count, total_checked = compute_pvalue_kgw(
+                        indices_list, green_list, args.h, gamma
+                    )
 
-                        current_ratio = white / total_indices
+                    current_ratio = (
+                        green_count / total_checked if total_checked > 0 else 0
+                    )
                     all_calculated_ratios.append(current_ratio)
 
-                    prediction = 1 if current_ratio > args.WATERMARK_THRESHOLD else 0
+                    # Use p-value threshold for prediction
+                    prediction = 1 if p_value < args.pvalue_threshold else 0
 
                     all_true_labels.append(true_label)
                     all_predictions.append(prediction)
+
+                    # Store detailed results
+                    result_dict = {
+                        "filename": filename,
+                        "directory": image_directory,
+                        "true_label": int(true_label),
+                        "predicted_label": int(prediction),
+                        "p_value": float(p_value),
+                        "green_ratio": float(current_ratio),
+                        "gamma": float(gamma),
+                        "green_count": int(green_count),
+                        "total_checked": int(total_checked),
+                        "algorithm": algorithm,
+                        "attack_type": args.chosen_attack,
+                        "correct": bool(true_label == prediction),
+                        "watermarked": bool(true_label == 1),
+                        "detected_as_watermarked": bool(prediction == 1),
+                    }
+
+                    # Add attack-specific parameters
+                    if args.chosen_attack == "jpeg":
+                        result_dict["jpeg_quality"] = args.jpeg_attack_quality
+                    elif args.chosen_attack == "blurring":
+                        result_dict["blur_kernel_size"] = args.blur_kernel_size
+                    elif args.chosen_attack == "noise":
+                        result_dict["noise_std_fraction"] = args.noise_std_fraction
+                    elif args.chosen_attack == "color_jitter":
+                        result_dict["color_jitter_brightness"] = (
+                            args.color_jitter_brightness
+                        )
+                    elif args.chosen_attack == "cropping":
+                        result_dict["crop_scale"] = args.crop_scale
+
+                    image_results.append(result_dict)
+
                     processed_image_count += 1
 
                     if processed_image_count % 100 == 0:
@@ -601,7 +773,8 @@ if __name__ == "__main__":
             else ""
         )
     )
-    print(f"Watermark Prediction Threshold: > {args.WATERMARK_THRESHOLD}")
+    print(f"Watermark Detection: p-value < {args.pvalue_threshold}")
+    print(f"Context window size (h): {args.h}")
     print(
         f"Total images processed: {processed_image_count} (Expected: {total_images_to_process})"
     )
@@ -643,9 +816,149 @@ if __name__ == "__main__":
                 f"  Accuracy on Non-Watermarked (Label 0): {non_watermarked_acc:.4f} ({non_watermarked_correct}/{len(non_watermarked_indices)})"
             )
 
+        # Calculate TPR @ FPR metric
+        tpr_at_fpr = None
+        if len(image_results) > 0:
+            # Extract p-values and true labels from image_results
+            all_pvalues = [result["p_value"] for result in image_results]
+            y_true = [result["true_label"] for result in image_results]
+
+            # Use negative p-value as score (lower p-value = higher watermark confidence)
+            y_score = [-pval for pval in all_pvalues]
+
+            # Calculate ROC curve
+            fpr_array, tpr_array, thresholds = roc_curve(y_true, y_score, pos_label=1)
+
+            # Find TPR at the specified FPR threshold (convert percentage to fraction)
+            target_fpr = args.fpr_threshold / 100.0
+
+            # Find the closest FPR value to the target
+            idx = np.argmin(np.abs(fpr_array - target_fpr))
+            tpr_at_fpr = float(tpr_array[idx])
+            actual_fpr = float(fpr_array[idx])
+
+            print(
+                f"\nTPR @ FPR={args.fpr_threshold}%: {tpr_at_fpr:.4f} (actual FPR: {actual_fpr*100:.2f}%)"
+            )
+
+        # Prepare results dictionary
+        attack_params = {}
+        if args.chosen_attack == "jpeg":
+            attack_params["jpeg_quality"] = args.jpeg_attack_quality
+        elif args.chosen_attack == "blurring":
+            attack_params["blur_kernel_size"] = args.blur_kernel_size
+        elif args.chosen_attack == "noise":
+            attack_params["noise_std_fraction"] = args.noise_std_fraction
+        elif args.chosen_attack == "color_jitter":
+            attack_params["color_jitter_brightness"] = args.color_jitter_brightness
+        elif args.chosen_attack == "cropping":
+            attack_params["crop_scale"] = args.crop_scale
+
+        results = {
+            "parameters": {
+                "watermarked_dir": args.Watermarked_dir,
+                "not_watermarked_dir": args.Not_Watermarked_dir,
+                "pvalue_threshold": args.pvalue_threshold,
+                "context_window_h": args.h,
+                "attack_type": args.chosen_attack,
+                "attack_params": attack_params,
+                "distortion_seed": args.distortion_seed,
+                "seed": args.seed,
+                "replacement_ratio": args.replacement_ratio,
+                "algorithm": args.algorithm,
+                "fpr_threshold_percent": args.fpr_threshold,
+            },
+            "summary": {
+                "total_images_processed": processed_image_count,
+                "overall_accuracy": float(accuracy),
+                "correct_predictions": correct_predictions,
+                "average_green_ratio": (
+                    float(sum(all_calculated_ratios) / len(all_calculated_ratios))
+                    if all_calculated_ratios
+                    else 0.0
+                ),
+                "tpr_at_fpr": tpr_at_fpr,
+                "fpr_threshold_percent": args.fpr_threshold,
+                "watermarked_stats": (
+                    {
+                        "total": len(watermarked_indices),
+                        "correct": watermarked_correct if watermarked_indices else 0,
+                        "accuracy": (
+                            float(watermarked_acc) if watermarked_indices else 0.0
+                        ),
+                    }
+                    if watermarked_indices
+                    else None
+                ),
+                "non_watermarked_stats": (
+                    {
+                        "total": len(non_watermarked_indices),
+                        "correct": (
+                            non_watermarked_correct if non_watermarked_indices else 0
+                        ),
+                        "accuracy": (
+                            float(non_watermarked_acc)
+                            if non_watermarked_indices
+                            else 0.0
+                        ),
+                    }
+                    if non_watermarked_indices
+                    else None
+                ),
+            },
+            "individual_results": image_results,
+        }
+
+        # Save results to JSON file
+        with open(args.results_output, "w") as f:
+            json.dump(results, f, indent=2)
+
+        print(f"\nResults saved to: {args.results_output}")
+
     else:
         print(
             "\nCould not calculate accuracy. Not enough data processed or mismatch in label/prediction counts."
         )
+
+        # Save empty results
+        attack_params = {}
+        if args.chosen_attack == "jpeg":
+            attack_params["jpeg_quality"] = args.jpeg_attack_quality
+        elif args.chosen_attack == "blurring":
+            attack_params["blur_kernel_size"] = args.blur_kernel_size
+        elif args.chosen_attack == "noise":
+            attack_params["noise_std_fraction"] = args.noise_std_fraction
+        elif args.chosen_attack == "color_jitter":
+            attack_params["color_jitter_brightness"] = args.color_jitter_brightness
+        elif args.chosen_attack == "cropping":
+            attack_params["crop_scale"] = args.crop_scale
+
+        results = {
+            "parameters": {
+                "watermarked_dir": args.Watermarked_dir,
+                "not_watermarked_dir": args.Not_Watermarked_dir,
+                "pvalue_threshold": args.pvalue_threshold,
+                "context_window_h": args.h,
+                "attack_type": args.chosen_attack,
+                "attack_params": attack_params,
+                "distortion_seed": args.distortion_seed,
+                "seed": args.seed,
+                "replacement_ratio": args.replacement_ratio,
+                "algorithm": args.algorithm,
+                "fpr_threshold_percent": args.fpr_threshold,
+            },
+            "summary": {
+                "total_images_processed": 0,
+                "overall_accuracy": 0.0,
+                "tpr_at_fpr": None,
+                "fpr_threshold_percent": args.fpr_threshold,
+            },
+            "individual_results": [],
+        }
+
+        with open(args.results_output, "w") as f:
+            json.dump(results, f, indent=2)
+
+        print(f"Empty results saved to: {args.results_output}")
 
     print("\nScript finished.")

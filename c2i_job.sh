@@ -3,7 +3,7 @@
 #SBATCH --partition=scavenger
 #SBATCH --qos=scavenger
 #SBATCH --account=scavenger
-#SBATCH --time=1-00:00:00
+#SBATCH --time=3-00:00:00
 #SBATCH --mem=32gb
 #SBATCH --gres=gpu:rtxa4000:1
 #SBATCH --cpus-per-task=4
@@ -37,7 +37,8 @@ COMMON_ARGS="--vq-ckpt ${VQ_CKPT} \
              --num-assignments 10 \
              --num-classes 1000 \
              --num-seeds-per-class 1 \
-             --gamma 0.5"
+             --gamma 0.5
+             --overwrite"
 
 # --- Algorithm-specific args ---
 EXTRA_ARGS=""

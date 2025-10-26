@@ -4,7 +4,7 @@
 #SBATCH --partition=scavenger
 #SBATCH --qos=scavenger
 #SBATCH --account=scavenger
-#SBATCH --time=1-00:00:00
+#SBATCH --time=3-00:00:00
 #SBATCH --mem=32gb
 #SBATCH --gres=gpu:rtxa4000:1
 #SBATCH --cpus-per-task=4
@@ -36,7 +36,8 @@ BASE_SAVE_DIR="/cmlscratch/anirudhs/graph_watermark/images/t2i_experiments"
 # --- Common args ---
 COMMON_ARGS="--vq-ckpt ${VQ_CKPT} \
              --num-assignments 10 \
-             --gamma 0.5"
+             --gamma 0.5
+             --overwrite"
 
 # --- Algorithm-specific args ---
 EXTRA_ARGS=""

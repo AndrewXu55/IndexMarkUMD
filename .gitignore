@@ -165,4 +165,6 @@ cython_debug/
 *.log
 logs/
 slurm_logs/
-
+*.png
+*.json
+results/

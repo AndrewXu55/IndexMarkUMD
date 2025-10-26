@@ -552,14 +552,15 @@ def clustering_based_assignment(codebook_vectors, n_clusters, seed=42, device="c
 
 
 def compute_spectral_graph_laplacian(
-    codebook_vectors, sigma=1.0, epsilon=1e-12, device="cuda"
+    codebook_vectors, sigma=1.0, k=100, epsilon=1e-12, device="cuda"
 ):
     """
-    Compute the normalized graph Laplacian from codebook vectors.
+    Compute the normalized graph Laplacian from codebook vectors using KNN.
 
     Args:
         codebook_vectors: Codebook weight matrix (N x D), numpy array
         sigma: Scaling parameter for Gaussian kernel
+        k: Number of nearest neighbors for KNN
         epsilon: Small number for numerical stability
         device: Device to run computation on
 
@@ -570,14 +571,27 @@ def compute_spectral_graph_laplacian(
     N = codebook_vectors.shape[0]
     C = torch.from_numpy(codebook_vectors).float().to(device)
 
-    # Compute pairwise distances efficiently
-    norms_sq = torch.sum(C**2, dim=1, keepdim=True)
-    distances_sq = norms_sq + norms_sq.T - 2 * torch.mm(C, C.T)
-    distances_sq = torch.clamp(distances_sq, min=0)
+    # Compute pairwise squared distances
+    with torch.no_grad():
+        norms_sq = torch.sum(C**2, dim=1, keepdim=True)
+        distances_sq = norms_sq + norms_sq.T - 2 * torch.mm(C, C.T)
+        distances_sq = torch.clamp(distances_sq, min=0)
 
-    # Gaussian kernel for similarity weights
-    W = torch.exp(-distances_sq / (2 * sigma**2))
-    W.fill_diagonal_(0)
+        # For each row, keep only k nearest neighbors
+        knn_mask = torch.zeros_like(distances_sq, dtype=torch.bool)
+        topk = torch.topk(
+            distances_sq, k=k + 1, largest=False
+        )  # +1 because self-distance is zero
+        knn_mask.scatter_(1, topk.indices, True)
+
+        # Symmetrize the mask (i connected to j if either i->j or j->i)
+        knn_mask = knn_mask | knn_mask.T
+
+        # Apply RBF only to k-NN entries
+        W = torch.zeros_like(distances_sq)
+        W[knn_mask] = torch.exp(-distances_sq[knn_mask] / (2 * sigma**2))
+        W.fill_diagonal_(0)
+        del distances_sq, knn_mask
 
     # Normalized Laplacian: L_sym = I - D^(-1/2) W D^(-1/2)
     d = torch.sum(W, dim=1)
@@ -651,6 +665,7 @@ def spectral_clustering_assignment(
     codebook_vectors,
     n_clusters=100,
     sigma=1.0,
+    k=100,
     epsilon=1e-12,
     seed=42,
     gamma=0.5,
@@ -659,12 +674,13 @@ def spectral_clustering_assignment(
     """
     High-accuracy spectral clustering for watermark families.
     Partitions N codebook tokens into M robust families, then assigns families
-    to red/green with gamma fraction as green tokens. Uses GPU acceleration.
+    to red/green with gamma fraction as green tokens. Uses GPU acceleration with KNN.
 
     Args:
         codebook_vectors: Codebook weight matrix (N x D), numpy array
         n_clusters: Number of families/clusters (default: 100)
         sigma: Scaling parameter for Gaussian kernel (default: 1.0)
+        k: Number of nearest neighbors for KNN (default: 100)
         epsilon: Small number for numerical stability (default: 1e-12)
         seed: Random seed for family color assignment (default: 42)
         gamma: Fraction of tokens to mark as green (default: 0.5)
@@ -675,16 +691,16 @@ def spectral_clustering_assignment(
         green_tokens: Tensor of token indices assigned to green
     """
     print(
-        f"Running spectral clustering assignment (GPU, M={n_clusters}, sigma={sigma}, gamma={gamma})..."
+        f"Running spectral clustering assignment (GPU, M={n_clusters}, sigma={sigma}, k={k}, gamma={gamma})..."
     )
 
     M = n_clusters
 
-    print("  Phase 1: Computing full pairwise similarity matrix on GPU...")
+    print("  Phase 1: Computing KNN-based pairwise similarity matrix on GPU...")
     print("  Phase 2: Computing normalized Laplacian on GPU...")
 
     L_sym, N = compute_spectral_graph_laplacian(
-        codebook_vectors, sigma, epsilon, device
+        codebook_vectors, sigma, k, epsilon, device
     )
 
     print(f"    Dense graph constructed on GPU: {N} nodes")
@@ -758,16 +774,17 @@ def spectral_clustering_assignment(
 
 
 def spectral_bisection_assignment(
-    codebook_vectors, sigma=1.0, epsilon=1e-12, gamma=0.5, device="cuda"
+    codebook_vectors, sigma=1.0, k=100, epsilon=1e-12, gamma=0.5, device="cuda"
 ):
     """
     Production-grade spectral bisection for robust watermark assignment.
     Partitions N codebook tokens into two sets (red and green) with gamma fraction as green
-    using graph spectral methods with full pairwise distances on GPU.
+    using graph spectral methods with KNN-based pairwise distances on GPU.
 
     Args:
         codebook_vectors: Codebook weight matrix (N x D), numpy array
         sigma: Scaling parameter for Gaussian kernel (default: 1.0)
+        k: Number of nearest neighbors for KNN (default: 100)
         epsilon: Small number for numerical stability (default: 1e-12)
         gamma: Fraction of tokens to mark as green (default: 0.5)
         device: Device to run computation on (default: 'cuda')
@@ -777,14 +794,14 @@ def spectral_bisection_assignment(
         green_tokens: Tensor of token indices assigned to green
     """
     print(
-        f"Running spectral bisection assignment (GPU, full distance, sigma={sigma}, gamma={gamma})..."
+        f"Running spectral bisection assignment (GPU, KNN-based, sigma={sigma}, k={k}, gamma={gamma})..."
     )
 
-    print("  Phase 1: Computing full pairwise distance matrix on GPU...")
+    print("  Phase 1: Computing KNN-based pairwise distance matrix on GPU...")
     print("  Phase 2: Computing normalized Laplacian on GPU...")
 
     L_sym, N = compute_spectral_graph_laplacian(
-        codebook_vectors, sigma, epsilon, device
+        codebook_vectors, sigma, k, epsilon, device
     )
 
     print(f"    Full graph constructed on GPU: {N} nodes, {N*(N-1)} potential edges")
@@ -859,6 +876,7 @@ def generate_multiple_assignments(
     num_assignments,
     cluster_size=1000,
     spectral_sigma=1.0,
+    spectral_knn=100,
     spectral_families=100,
     base_seed=42,
     gamma=0.5,
@@ -874,6 +892,7 @@ def generate_multiple_assignments(
         num_assignments: Number of different assignments to generate
         cluster_size: Cluster size for clustering algorithm
         spectral_sigma: Sigma parameter for spectral methods
+        spectral_knn: Number of nearest neighbors for spectral methods
         spectral_families: Number of families for spectral clustering
         base_seed: Base random seed
         gamma: Fraction of tokens to mark as green (e.g., 0.5 for 50%)
@@ -907,7 +926,11 @@ def generate_multiple_assignments(
         # Deterministic spectral bisection - compute once and duplicate
         print(f"Spectral bisection is deterministic, computing once and duplicating...")
         red_tokens, green_tokens = spectral_bisection_assignment(
-            codebook_vectors, sigma=spectral_sigma, gamma=gamma, device=device
+            codebook_vectors,
+            sigma=spectral_sigma,
+            k=spectral_knn,
+            gamma=gamma,
+            device=device,
         )
         print(f"  Spectral bisection: {len(red_tokens)} red, {len(green_tokens)} green")
         for i in range(num_assignments):
@@ -962,10 +985,10 @@ def generate_multiple_assignments(
         print(f"Computing spectral embedding once...")
 
         # Phase 1-2: Compute graph Laplacian
-        print(f"  Phase 1: Computing full pairwise distance matrix...")
+        print(f"  Phase 1: Computing KNN-based pairwise distance matrix...")
         print(f"  Phase 2: Computing normalized Laplacian...")
         L_sym, N = compute_spectral_graph_laplacian(
-            codebook_vectors, spectral_sigma, device=device
+            codebook_vectors, spectral_sigma, spectral_knn, device=device
         )
 
         # Phase 3: Eigendecomposition
@@ -1114,6 +1137,7 @@ def main(
         num_assignments=num_assignments,
         cluster_size=args.cluster_size,
         spectral_sigma=args.spectral_sigma,
+        spectral_knn=args.spectral_knn,
         spectral_families=args.spectral_families,
         base_seed=args.seed,
         gamma=args.gamma,
@@ -1123,6 +1147,21 @@ def main(
 
     total_images_generated = 0
     overall_start_time = time.time()
+
+    # Determine save directory and watermark label early
+    if algorithm == "pairwise":
+        watermark_label = "pairwise"
+    elif algorithm in ["random", "clustering", "spectral", "spectral-clustering"]:
+        if args.delta == 0.0:
+            watermark_label = f"{algorithm}-baseline"
+        else:
+            watermark_label = f"{algorithm}-delta{args.delta}"
+    else:
+        raise ValueError(f"Unknown algorithm: {algorithm}")
+
+    current_save_dir = os.path.join(save_base_dir, f"{watermark_label}-{args.image_size}")
+    os.makedirs(current_save_dir, exist_ok=True)
+    os.makedirs(os.path.join(current_save_dir, "assignments"), exist_ok=True)
 
     for i in range(0, total_classes, batch_size):
         batch_start_time = time.time()
@@ -1144,6 +1183,22 @@ def main(
             print(
                 f"  Seed {seed_idx + 1}/{num_seeds_per_class} (Global Seed: {current_seed})"
             )
+
+            # Check if all images in this batch/seed already exist
+            all_exist = True
+            for img_idx_in_batch in range(current_batch_size):
+                actual_class_label = current_batch_labels[img_idx_in_batch]
+                filename = f"class{actual_class_label:04d}_seed{seed_idx:02d}.png"
+                save_path = os.path.join(current_save_dir, filename)
+                if not os.path.exists(save_path):
+                    all_exist = False
+                    break
+
+            if all_exist and not args.overwrite:
+                print(
+                    f"    Skipped seed {seed_idx + 1}/{num_seeds_per_class}: All images already exist"
+                )
+                continue
 
             # Randomly select assignment for this batch/seed (seeded for reproducibility)
             assignment_idx_seed = current_seed
@@ -1216,11 +1271,6 @@ def main(
                 valid_log_ratio = log_ratio_flat[np.isfinite(log_ratio_flat)]
 
                 # Apply 100% watermarking
-                current_save_dir = os.path.join(
-                    save_base_dir, f"pairwise-{args.image_size}"
-                )
-                os.makedirs(current_save_dir, exist_ok=True)
-
                 if len(valid_log_ratio) > 0:
                     log_threshold = np.percentile(valid_log_ratio, 100)
                 else:
@@ -1246,6 +1296,7 @@ def main(
                     actual_class_label = current_batch_labels[img_idx_in_batch]
                     filename = f"class{actual_class_label:04d}_seed{seed_idx:02d}.png"
                     save_path = os.path.join(current_save_dir, filename)
+
                     save_image(
                         replaced_samples[img_idx_in_batch],
                         save_path,
@@ -1253,20 +1304,29 @@ def main(
                         value_range=(-1, 1),
                     )
                     total_images_generated += 1
+
+                    # Save assignment JSON for pairwise algorithm
+                    if hc and hasattr(hc, "pairs"):
+                        assignment_data = {
+                            "image_id": f"class{actual_class_label:04d}_seed{seed_idx:02d}",
+                            "algorithm": "pairwise",
+                            "pairs": hc.pairs,
+                            "red_list": list(hc.red_list),
+                            "green_list": list(hc.green_list),
+                            "num_pairs": len(hc.pairs),
+                            "parameters": {
+                                "replacement_ratio": args.replacement_ratio,
+                            },
+                        }
+                        json_path = os.path.join(
+                            current_save_dir,
+                            "assignments",
+                            f"class{actual_class_label:04d}_seed{seed_idx:02d}.json",
+                        )
+                        with open(json_path, "w") as f:
+                            json.dump(assignment_data, f, indent=2)
             else:
                 # For non-pairwise algorithms, watermarking is already applied via logit boosting
-                watermark_label = algorithm
-                # Add delta to the label to differentiate watermarked vs non-watermarked
-                if args.delta == 0.0:
-                    watermark_label = f"{watermark_label}-baseline"
-                else:
-                    watermark_label = f"{watermark_label}-delta{args.delta}"
-
-                current_save_dir = os.path.join(
-                    save_base_dir, f"{watermark_label}-{args.image_size}"
-                )
-                os.makedirs(current_save_dir, exist_ok=True)
-
                 new_indices = index_sample.clone()
 
                 t2 = time.time()
@@ -1284,6 +1344,7 @@ def main(
                     actual_class_label = current_batch_labels[img_idx_in_batch]
                     filename = f"class{actual_class_label:04d}_seed{seed_idx:02d}.png"
                     save_path = os.path.join(current_save_dir, filename)
+
                     save_image(
                         replaced_samples[img_idx_in_batch],
                         save_path,
@@ -1291,6 +1352,44 @@ def main(
                         value_range=(-1, 1),
                     )
                     total_images_generated += 1
+
+                    # Save assignment JSON for non-pairwise algorithms
+                    assignment_data = {
+                        "image_id": f"class{actual_class_label:04d}_seed{seed_idx:02d}",
+                        "assignment_id": assignment_idx,
+                        "algorithm": algorithm,
+                        "red_list": red_tokens.cpu().tolist(),
+                        "green_list": green_tokens.cpu().tolist(),
+                        "num_red": len(red_tokens),
+                        "num_green": len(green_tokens),
+                        "parameters": {
+                            "gamma": args.gamma,
+                            "seed": args.seed + assignment_idx,
+                            "delta": args.delta,
+                        },
+                    }
+
+                    # Add algorithm-specific parameters
+                    if algorithm == "clustering":
+                        assignment_data["parameters"][
+                            "cluster_size"
+                        ] = args.cluster_size
+                    elif algorithm in ["spectral", "spectral-clustering"]:
+                        assignment_data["parameters"][
+                            "spectral_sigma"
+                        ] = args.spectral_sigma
+                        if algorithm == "spectral-clustering":
+                            assignment_data["parameters"][
+                                "spectral_families"
+                            ] = args.spectral_families
+
+                    json_path = os.path.join(
+                        current_save_dir,
+                        "assignments",
+                        f"class{actual_class_label:04d}_seed{seed_idx:02d}.json",
+                    )
+                    with open(json_path, "w") as f:
+                        json.dump(assignment_data, f, indent=2)
 
             seed_end_time = time.time()
             print(
@@ -1489,7 +1588,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--algorithm",
         type=str,
-        default="spectral-clustering",
+        default="pairwise",
         choices=[
             "pairwise",
             "random",
@@ -1502,7 +1601,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cluster-size",
         type=int,
-        default=512,
+        default=157,
         help="Number of clusters for K-means clustering algorithm (only used when algorithm='clustering').",
     )
     parser.add_argument(
@@ -1520,8 +1619,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--spectral-families",
         type=int,
-        default=512,
+        default=157,
         help="Number of families/clusters for spectral clustering (only used when algorithm='spectral-clustering').",
+    )
+    parser.add_argument(
+        "--spectral-knn",
+        type=int,
+        default=100,
+        help="Number of nearest neighbors (k) for KNN-based spectral methods (used for 'spectral' and 'spectral-clustering').",
     )
     parser.add_argument(
         "--num-assignments",
@@ -1534,6 +1639,12 @@ if __name__ == "__main__":
         type=float,
         default=0.5,
         help="Fraction of vocabulary to mark as green tokens (e.g., 0.5 for 50%%, 0.25 for 25%%). Used for partitioning in clustering/spectral algorithms.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="If set, overwrite existing images. If not set (default), skip generation for images that already exist.",
     )
 
     args = parser.parse_args()

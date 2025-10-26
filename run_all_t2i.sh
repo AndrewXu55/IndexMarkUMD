@@ -6,8 +6,9 @@
 # ==============================================
 
 # --- Experiment parameters ---
-ALGORITHMS=("random" "pairwise" "clustering" "spectral" "spectral-clustering")
-RESOLUTIONS=(256 384 512)
+# ALGORITHMS=("random" "pairwise" "clustering" "spectral" "spectral-clustering")
+ALGORITHMS=("clustering" "spectral" "spectral-clustering")
+RESOLUTIONS=(256 512)
 
 # --- Log setup ---
 mkdir -p slurm_logs/t2i
