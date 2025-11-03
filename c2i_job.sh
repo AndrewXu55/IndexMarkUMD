@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=c2i_gen
-#SBATCH --partition=scavenger
-#SBATCH --qos=scavenger
-#SBATCH --account=scavenger
+#SBATCH --partition=cml-scavenger
+#SBATCH --qos=cml-scavenger
+#SBATCH --account=cml-scavenger
 #SBATCH --time=3-00:00:00
 #SBATCH --mem=32gb
 #SBATCH --gres=gpu:rtxa4000:1

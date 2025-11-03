@@ -1181,28 +1181,21 @@ def main(
         batch_prompts = prompts[batch_start:batch_end]
         batch_filenames = filename_list[batch_start:batch_end]
 
-        # Determine save directory and watermark label early for overwrite check
+        # Check if all images in this batch already exist (check both baseline and watermarked)
+        baseline_save_dir = os.path.join(save_base_dir, f"{algorithm}-baseline-{args.image_size}")
+
+        # For pairwise, watermarked uses delta=0.0 (not args.delta), so use special naming
         if algorithm == "pairwise":
-            watermark_label = "pairwise"
-        elif algorithm in ["random", "clustering", "spectral", "spectral-clustering"]:
-            if args.delta == 0.0:
-                watermark_label = f"{algorithm}-baseline"
-            else:
-                watermark_label = f"{algorithm}-delta{args.delta}"
+            watermarked_save_dir = os.path.join(save_base_dir, f"{algorithm}-{args.image_size}")
         else:
-            raise ValueError(f"Unknown algorithm: {algorithm}")
+            watermarked_save_dir = os.path.join(save_base_dir, f"{algorithm}-delta{args.delta}-{args.image_size}")
 
-        current_save_dir = os.path.join(
-            save_base_dir, f"{watermark_label}-{args.image_size}"
-        )
-        os.makedirs(current_save_dir, exist_ok=True)
-
-        # Check if all images in this batch already exist
         all_exist = True
         for i in range(current_batch_size):
             im_idx = batch_filenames[i]
-            save_path = os.path.join(current_save_dir, f"{im_idx}.png")
-            if not os.path.exists(save_path):
+            baseline_path = os.path.join(baseline_save_dir, f"{im_idx}.png")
+            watermarked_path = os.path.join(watermarked_save_dir, f"{im_idx}.png")
+            if not (os.path.exists(baseline_path) and os.path.exists(watermarked_path)):
                 all_exist = False
                 break
 
@@ -1250,161 +1243,225 @@ def main(
             f"  Using assignment {assignment_idx + 1}/{len(assignments_pool)} for this batch (seed={args.seed + batch_prompt_idx})"
         )
 
-        # Configure generation parameters based on algorithm and delta
-        if algorithm == "pairwise":
-            # Pairwise uses confidence-based replacement with index_mapping
-            if hasattr(hc, "index_mapping"):
-                index_map_to_pass = hc.index_mapping
-            else:
-                index_map_to_pass = None
-                print("Warning: hc object does not have 'index_mapping' attribute.")
-            green_list_to_pass = None
-            delta_to_pass = 0.0
-
-        elif algorithm in ["random", "clustering", "spectral", "spectral-clustering"]:
-            # These algorithms use logit boosting with green_list
-            # delta=0.0 means no watermarking (baseline), delta=2.0 means watermarking
-            index_map_to_pass = None
-            if args.delta > 0:
-                green_list_to_pass = green_tokens
-            else:
-                # When delta=0, no watermarking (baseline mode for this algorithm)
-                green_list_to_pass = None
-            delta_to_pass = args.delta
-
-        else:
-            raise ValueError(f"Unknown algorithm: {algorithm}")
-
-        print("  Generating initial indices with GPT...")
-        t1 = time.time()
-
-        index_sample, con = generate(
-            gpt_model,
-            c_indices,
-            latent_size**2,
-            c_emb_masks,
-            cfg_scale=args.cfg_scale,
-            temperature=args.temperature,
-            top_k=args.top_k,
-            top_p=args.top_p,
-            sample_logits=True,
-            index_mapping=index_map_to_pass,
-            green_list=green_list_to_pass,
-            delta=delta_to_pass,
-        )
-        sampling_time = time.time() - t1
-        print(f"  GPT sampling took {sampling_time:.2f} seconds.")
-
-        conf_pairs = con
-        original_conf = conf_pairs[:, :, 0].cpu().numpy().flatten()
-        paired_conf = conf_pairs[:, :, 1].cpu().numpy().flatten()
-
-        ratio = np.divide(
-            original_conf,
-            paired_conf,
-            out=np.ones_like(original_conf) * np.inf,
-            where=paired_conf != 0,
-        )
-        log_ratio = np.log10(ratio, out=np.full_like(ratio, -np.inf), where=ratio > 0)
-        log_ratio_flat = log_ratio.flatten()
-        valid_log_ratio = log_ratio_flat[np.isfinite(log_ratio_flat)]
-
+        # Generate baseline and watermarked versions for each algorithm
         print(f"    Processing with algorithm: {algorithm}")
 
         if algorithm == "pairwise":
+            # For pairwise: generate ONCE with delta=0.0, then create both baseline and watermarked
+            print("  Generating initial indices with GPT (delta=0.0 for pairwise)...")
+            t1 = time.time()
 
-            print(f"    Using pairwise assignment with confidence-based replacement")
-            if len(valid_log_ratio) > 0:
-                log_threshold = np.percentile(valid_log_ratio, 100)
-            else:
-                log_threshold = -np.inf
-            new_indices, count = vectorized_replacement_process(
-                index_sample, log_ratio_flat, log_threshold, hc
+            index_sample, con = generate(
+                gpt_model,
+                c_indices,
+                latent_size**2,
+                c_emb_masks,
+                cfg_scale=args.cfg_scale,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                top_p=args.top_p,
+                sample_logits=True,
+                index_mapping=None,  # No watermarking during generation
+                green_list=None,
+                delta=0.0,
             )
-            print(f"    Replaced {count} tokens")
-        elif algorithm == "random":
+            sampling_time = time.time() - t1
+            print(f"  GPT sampling took {sampling_time:.2f} seconds.")
 
-            print(f"    Random assignment with logit boosting (delta={args.delta})")
-            new_indices = index_sample.clone()
-        elif algorithm == "clustering":
+            # Create baseline version (no replacement)
+            baseline_indices = index_sample.clone()
 
-            print(
-                f"    Clustering assignment with logit boosting (delta={args.delta}, clusters={args.cluster_size})"
-            )
-            new_indices = index_sample.clone()
-        elif algorithm == "spectral":
+            # Create watermarked version (replace ALL red tokens with green pairs)
+            print(f"    Creating pairwise watermarked version (100% red->green replacement)")
+            watermarked_indices = baseline_indices.clone()
+            watermarked_indices_flat = watermarked_indices.view(-1)
 
-            print(
-                f"    Spectral bisection with logit boosting (delta={args.delta}, sigma={args.spectral_sigma})"
-            )
-            new_indices = index_sample.clone()
-        elif algorithm == "spectral-clustering":
+            # Replace all red tokens with their green pairs
+            replacement_count = 0
+            if hc and hasattr(hc, 'red_list_tensor') and hasattr(hc, 'index_mapping'):
+                is_red = torch.isin(watermarked_indices_flat, hc.red_list_tensor)
+                red_positions = torch.where(is_red)[0]
 
-            print(
-                f"    Spectral clustering with logit boosting (delta={args.delta}, families={args.spectral_families}, sigma={args.spectral_sigma})"
-            )
-            new_indices = index_sample.clone()
+                for pos in red_positions:
+                    token_id = watermarked_indices_flat[pos].item()
+                    green_token = hc.index_mapping.get(token_id, token_id)
+                    if green_token != token_id:
+                        watermarked_indices_flat[pos] = green_token
+                        replacement_count += 1
+
+            print(f"    Replaced {replacement_count} red tokens with green pairs")
+
+            # Decode both versions
+            print("  Decoding baseline with VQ model...")
+            t2 = time.time()
+            baseline_samples = vq_model.decode_code(baseline_indices, qzshape)
+            print(f"  VQ decoding (baseline) took {time.time() - t2:.2f} seconds.")
+
+            print("  Decoding watermarked with VQ model...")
+            t2 = time.time()
+            watermarked_samples = vq_model.decode_code(watermarked_indices, qzshape)
+            print(f"  VQ decoding (watermarked) took {time.time() - t2:.2f} seconds.")
+
         else:
-            raise ValueError(f"Unknown algorithm: {algorithm}")
+            # For other algorithms: generate TWICE (baseline with delta=0.0, watermarked with delta=2.0)
+            print("  Generating baseline indices with GPT (delta=0.0)...")
+            t1 = time.time()
 
-        print("  Decoding with VQ model...")
-        t2 = time.time()
-        replaced_samples = vq_model.decode_code(new_indices, qzshape)
-        decoder_time = time.time() - t2
-        print(f"  VQ decoding took {decoder_time:.2f} seconds.")
+            baseline_indices, _ = generate(
+                gpt_model,
+                c_indices,
+                latent_size**2,
+                c_emb_masks,
+                cfg_scale=args.cfg_scale,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                top_p=args.top_p,
+                sample_logits=True,
+                index_mapping=None,
+                green_list=None,
+                delta=0.0,
+            )
+            baseline_sampling_time = time.time() - t1
+            print(f"  GPT sampling (baseline) took {baseline_sampling_time:.2f} seconds.")
 
-        # Save each image in the batch
+            print(f"  Generating watermarked indices with GPT (delta={args.delta})...")
+            t1 = time.time()
+
+            watermarked_indices, _ = generate(
+                gpt_model,
+                c_indices,
+                latent_size**2,
+                c_emb_masks,
+                cfg_scale=args.cfg_scale,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                top_p=args.top_p,
+                sample_logits=True,
+                index_mapping=None,
+                green_list=green_tokens,
+                delta=args.delta,
+            )
+            watermarked_sampling_time = time.time() - t1
+            print(f"  GPT sampling (watermarked) took {watermarked_sampling_time:.2f} seconds.")
+
+            # Decode both versions
+            print("  Decoding baseline with VQ model...")
+            t2 = time.time()
+            baseline_samples = vq_model.decode_code(baseline_indices, qzshape)
+            print(f"  VQ decoding (baseline) took {time.time() - t2:.2f} seconds.")
+
+            print("  Decoding watermarked with VQ model...")
+            t2 = time.time()
+            watermarked_samples = vq_model.decode_code(watermarked_indices, qzshape)
+            print(f"  VQ decoding (watermarked) took {time.time() - t2:.2f} seconds.")
+
+        # Save both baseline and watermarked images
         print("  Saving images...")
-        os.makedirs(os.path.join(current_save_dir, "assignments"), exist_ok=True)
+        baseline_save_dir = os.path.join(save_base_dir, f"{algorithm}-baseline-{args.image_size}")
+
+        # For pairwise, watermarked uses delta=0.0 (not args.delta), so use special naming
+        if algorithm == "pairwise":
+            watermarked_save_dir = os.path.join(save_base_dir, f"{algorithm}-{args.image_size}")
+        else:
+            watermarked_save_dir = os.path.join(save_base_dir, f"{algorithm}-delta{args.delta}-{args.image_size}")
+
+        os.makedirs(baseline_save_dir, exist_ok=True)
+        os.makedirs(watermarked_save_dir, exist_ok=True)
+        os.makedirs(os.path.join(baseline_save_dir, "assignments"), exist_ok=True)
+        os.makedirs(os.path.join(watermarked_save_dir, "assignments"), exist_ok=True)
+
         for i in range(current_batch_size):
             im_idx = batch_filenames[i]
-            save_path = os.path.join(current_save_dir, f"{im_idx}.png")
 
-            # Check if image already exists (in case batch was partially processed)
-            if os.path.exists(save_path) and not args.overwrite:
-                print(
-                    f"    Skipped prompt {batch_start + i + 1}/{num_prompts}: {save_path} (already exists)"
+            # Save baseline image
+            baseline_path = os.path.join(baseline_save_dir, f"{im_idx}.png")
+            if not (os.path.exists(baseline_path) and not args.overwrite):
+                save_image(
+                    baseline_samples[i : i + 1], baseline_path, nrow=1, normalize=True, value_range=(-1, 1)
                 )
-                continue
+                print(f"    Saved baseline {batch_start + i + 1}/{num_prompts}: {baseline_path}")
 
-            # Extract single image from batch
-            single_image = replaced_samples[i : i + 1]
-            save_image(
-                single_image, save_path, nrow=1, normalize=True, value_range=(-1, 1)
-            )
-            print(f"    Saved prompt {batch_start + i + 1}/{num_prompts}: {save_path}")
+            # Save watermarked image
+            watermarked_path = os.path.join(watermarked_save_dir, f"{im_idx}.png")
+            if not (os.path.exists(watermarked_path) and not args.overwrite):
+                save_image(
+                    watermarked_samples[i : i + 1], watermarked_path, nrow=1, normalize=True, value_range=(-1, 1)
+                )
+                print(f"    Saved watermarked {batch_start + i + 1}/{num_prompts}: {watermarked_path}")
 
-            # Save assignment JSON
+            # Save assignment JSONs for both versions
             if algorithm == "pairwise":
-                # Save pairwise assignment with pairs info
                 if hc and hasattr(hc, "pairs"):
-                    assignment_data = {
+                    # Baseline assignment
+                    baseline_assignment = {
                         "image_id": im_idx,
                         "algorithm": "pairwise",
+                        "version": "baseline",
                         "pairs": hc.pairs,
                         "red_list": list(hc.red_list),
                         "green_list": list(hc.green_list),
                         "num_pairs": len(hc.pairs),
                         "parameters": {
-                            "replacement_ratio": args.replacement_ratio,
+                            "replacement_ratio": 0.0,
+                            "delta": 0.0,
                         },
                     }
-                    json_path = os.path.join(
-                        current_save_dir, "assignments", f"{im_idx}.json"
-                    )
-                    with open(json_path, "w") as f:
-                        json.dump(assignment_data, f, indent=2)
-            elif algorithm in [
-                "random",
-                "clustering",
-                "spectral",
-                "spectral-clustering",
-            ]:
-                # Save non-pairwise assignment
-                assignment_data = {
+                    baseline_json_path = os.path.join(baseline_save_dir, "assignments", f"{im_idx}.json")
+                    with open(baseline_json_path, "w") as f:
+                        json.dump(baseline_assignment, f, indent=2)
+
+                    # Watermarked assignment
+                    watermarked_assignment = {
+                        "image_id": im_idx,
+                        "algorithm": "pairwise",
+                        "version": "watermarked",
+                        "pairs": hc.pairs,
+                        "red_list": list(hc.red_list),
+                        "green_list": list(hc.green_list),
+                        "num_pairs": len(hc.pairs),
+                        "parameters": {
+                            "replacement_ratio": 1.0,  # 100% replacement for watermarked
+                            "delta": 0.0,
+                        },
+                    }
+                    watermarked_json_path = os.path.join(watermarked_save_dir, "assignments", f"{im_idx}.json")
+                    with open(watermarked_json_path, "w") as f:
+                        json.dump(watermarked_assignment, f, indent=2)
+
+            else:
+                # Baseline assignment for other algorithms
+                baseline_assignment = {
                     "image_id": im_idx,
                     "assignment_id": assignment_idx,
                     "algorithm": algorithm,
+                    "version": "baseline",
+                    "red_list": red_tokens.cpu().tolist(),
+                    "green_list": green_tokens.cpu().tolist(),
+                    "num_red": len(red_tokens),
+                    "num_green": len(green_tokens),
+                    "parameters": {
+                        "gamma": args.gamma,
+                        "seed": args.seed + assignment_idx,
+                        "delta": 0.0,
+                    },
+                }
+                if algorithm == "clustering":
+                    baseline_assignment["parameters"]["cluster_size"] = args.cluster_size
+                elif algorithm in ["spectral", "spectral-clustering"]:
+                    baseline_assignment["parameters"]["spectral_sigma"] = args.spectral_sigma
+                    if algorithm == "spectral-clustering":
+                        baseline_assignment["parameters"]["spectral_families"] = args.spectral_families
+
+                baseline_json_path = os.path.join(baseline_save_dir, "assignments", f"{im_idx}.json")
+                with open(baseline_json_path, "w") as f:
+                    json.dump(baseline_assignment, f, indent=2)
+
+                # Watermarked assignment
+                watermarked_assignment = {
+                    "image_id": im_idx,
+                    "assignment_id": assignment_idx,
+                    "algorithm": algorithm,
+                    "version": "watermarked",
                     "red_list": red_tokens.cpu().tolist(),
                     "green_list": green_tokens.cpu().tolist(),
                     "num_red": len(red_tokens),
@@ -1415,24 +1472,16 @@ def main(
                         "delta": args.delta,
                     },
                 }
-
-                # Add algorithm-specific parameters
                 if algorithm == "clustering":
-                    assignment_data["parameters"]["cluster_size"] = args.cluster_size
+                    watermarked_assignment["parameters"]["cluster_size"] = args.cluster_size
                 elif algorithm in ["spectral", "spectral-clustering"]:
-                    assignment_data["parameters"][
-                        "spectral_sigma"
-                    ] = args.spectral_sigma
+                    watermarked_assignment["parameters"]["spectral_sigma"] = args.spectral_sigma
                     if algorithm == "spectral-clustering":
-                        assignment_data["parameters"][
-                            "spectral_families"
-                        ] = args.spectral_families
+                        watermarked_assignment["parameters"]["spectral_families"] = args.spectral_families
 
-                json_path = os.path.join(
-                    current_save_dir, "assignments", f"{im_idx}.json"
-                )
-                with open(json_path, "w") as f:
-                    json.dump(assignment_data, f, indent=2)
+                watermarked_json_path = os.path.join(watermarked_save_dir, "assignments", f"{im_idx}.json")
+                with open(watermarked_json_path, "w") as f:
+                    json.dump(watermarked_assignment, f, indent=2)
 
         batch_end_time = time.time()
         print(
@@ -1484,7 +1533,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--save-dir",
         type=str,
-        default="images/Gen_Image",
+        default="/cmlscratch/anirudhs/graph_watermark/images/t2i_experiments",
         help="Base directory to save generated images.",
     )
 

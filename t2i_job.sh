@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=t2i_gen
 #SBATCH --output=slurm_logs/t2i/%x.out
-#SBATCH --partition=scavenger
-#SBATCH --qos=scavenger
-#SBATCH --account=scavenger
+#SBATCH --partition=cml-scavenger
+#SBATCH --qos=cml-scavenger
+#SBATCH --account=cml-scavenger
 #SBATCH --time=3-00:00:00
 #SBATCH --mem=32gb
 #SBATCH --gres=gpu:rtxa4000:1

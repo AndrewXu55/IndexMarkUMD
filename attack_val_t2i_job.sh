@@ -39,17 +39,17 @@ BASE_IMAGE_DIR="/cmlscratch/anirudhs/graph_watermark/images/t2i_experiments"
 BASE_RESULTS_DIR="results/attacks_t2i"
 
 # --- Determine directory names based on algorithm and delta ---
-# NOT_WATERMARKED_DIR is always random-baseline for comparison
-NOT_WATERMARKED_DIR="${BASE_IMAGE_DIR}/random-baseline-${RESOLUTION}"
+# Each algorithm now has its own baseline directory
+# NOT_WATERMARKED_DIR uses the algorithm's baseline (delta=0.0)
+NOT_WATERMARKED_DIR="${BASE_IMAGE_DIR}/${ALGORITHM}-baseline-${RESOLUTION}"
 
+# WATERMARKED_DIR varies by algorithm:
+# - Pairwise uses special naming (both baseline and watermarked use delta=0.0)
+# - Other algorithms use delta value in directory name
 if [[ $ALGORITHM == "pairwise" ]]; then
-    # Pairwise uses just "pairwise-{resolution}" naming and no DIR_SUFFIX
-    WATERMARKED_DIR="${BASE_IMAGE_DIR}/pairwise-${RESOLUTION}"
+    WATERMARKED_DIR="${BASE_IMAGE_DIR}/${ALGORITHM}-${RESOLUTION}"
+    DIR_SUFFIX="watermarked"
     RESULTS_DIR="${BASE_RESULTS_DIR}/${ALGORITHM}/${RESOLUTION}"
-elif [[ $DELTA == "0.0" ]]; then
-    WATERMARKED_DIR="${BASE_IMAGE_DIR}/${ALGORITHM}-baseline-${RESOLUTION}"
-    DIR_SUFFIX="baseline"
-    RESULTS_DIR="${BASE_RESULTS_DIR}/${ALGORITHM}/${DIR_SUFFIX}/${RESOLUTION}"
 else
     WATERMARKED_DIR="${BASE_IMAGE_DIR}/${ALGORITHM}-delta${DELTA}-${RESOLUTION}"
     DIR_SUFFIX="delta${DELTA}"
@@ -69,6 +69,8 @@ COMMON_ARGS="--vq-ckpt ${VQ_CKPT} \
              --h 0 \
              --pvalue-threshold 0.01 \
              --algorithm ${ALGORITHM} \
+             --delta ${DELTA} \
+             --base-dir ${BASE_IMAGE_DIR} \
              --seed 0 \
              --replacement-ratio 1.0 \
              --target-image-size ${RESOLUTION} \
@@ -85,8 +87,6 @@ for ATTACK_TYPE in "${ATTACK_TYPES[@]}"; do
         # No attack - run once
         RESULTS_FILE="${RESULTS_DIR}/attack_none.json"
         python attack_val.py \
-            --Watermarked-dir "${WATERMARKED_DIR}" \
-            --Not-Watermarked-dir "${NOT_WATERMARKED_DIR}" \
             --results-output "${RESULTS_FILE}" \
             ${COMMON_ARGS} \
             --chosen-attack none
@@ -98,8 +98,6 @@ for ATTACK_TYPE in "${ATTACK_TYPES[@]}"; do
             echo "  JPEG quality: ${quality}"
             RESULTS_FILE="${RESULTS_DIR}/attack_jpeg_q${quality}.json"
             python attack_val.py \
-                --Watermarked-dir "${WATERMARKED_DIR}" \
-                --Not-Watermarked-dir "${NOT_WATERMARKED_DIR}" \
                 --results-output "${RESULTS_FILE}" \
                 ${COMMON_ARGS} \
                 --chosen-attack jpeg \
@@ -109,12 +107,10 @@ for ATTACK_TYPE in "${ATTACK_TYPES[@]}"; do
 
     elif [[ $ATTACK_TYPE == "blurring" ]]; then
         # Gaussian blur: kernel size from 1 to 19 in increments of 3
-        for kernel in 1 4 7 10 13 16 19; do
+        for kernel in 4 7 10 13 16 19; do
             echo "  Blur kernel size: ${kernel}"
             RESULTS_FILE="${RESULTS_DIR}/attack_blur_k${kernel}.json"
             python attack_val.py \
-                --Watermarked-dir "${WATERMARKED_DIR}" \
-                --Not-Watermarked-dir "${NOT_WATERMARKED_DIR}" \
                 --results-output "${RESULTS_FILE}" \
                 ${COMMON_ARGS} \
                 --chosen-attack blurring \
@@ -130,8 +126,6 @@ for ATTACK_TYPE in "${ATTACK_TYPES[@]}"; do
             noise_label=$(echo ${noise_std} | sed 's/\./_/')
             RESULTS_FILE="${RESULTS_DIR}/attack_noise_std${noise_label}.json"
             python attack_val.py \
-                --Watermarked-dir "${WATERMARKED_DIR}" \
-                --Not-Watermarked-dir "${NOT_WATERMARKED_DIR}" \
                 --results-output "${RESULTS_FILE}" \
                 ${COMMON_ARGS} \
                 --chosen-attack noise \
@@ -147,8 +141,6 @@ for ATTACK_TYPE in "${ATTACK_TYPES[@]}"; do
             bright_label=$(echo ${brightness} | sed 's/\./_/')
             RESULTS_FILE="${RESULTS_DIR}/attack_colorjitter_b${bright_label}.json"
             python attack_val.py \
-                --Watermarked-dir "${WATERMARKED_DIR}" \
-                --Not-Watermarked-dir "${NOT_WATERMARKED_DIR}" \
                 --results-output "${RESULTS_FILE}" \
                 ${COMMON_ARGS} \
                 --chosen-attack color_jitter \
@@ -163,8 +155,6 @@ for ATTACK_TYPE in "${ATTACK_TYPES[@]}"; do
             echo "  Crop scale: ${scale} (${scale_pct}%)"
             RESULTS_FILE="${RESULTS_DIR}/attack_crop_s${scale_pct}.json"
             python attack_val.py \
-                --Watermarked-dir "${WATERMARKED_DIR}" \
-                --Not-Watermarked-dir "${NOT_WATERMARKED_DIR}" \
                 --results-output "${RESULTS_FILE}" \
                 ${COMMON_ARGS} \
                 --chosen-attack cropping \

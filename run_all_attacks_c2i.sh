@@ -3,6 +3,7 @@
 # run_all_attacks_c2i.sh
 # Master launcher for all C2I attack validation experiments
 # Submits sbatch jobs with the correct algorithm/delta/resolution/attack combinations.
+# NOTE: All algorithms compare watermarked vs baseline versions
 # ==============================================
 
 # --- Experiment parameters ---
@@ -16,31 +17,34 @@ mkdir -p results/attacks_c2i
 echo "=============================================="
 echo "Submitting C2I Attack Validation experiments"
 echo "=============================================="
+echo "Directory structure:"
+echo "  - Non-pairwise:"
+echo "      Watermarked: {algorithm}-delta2.0-{resolution}"
+echo "      Baseline:    {algorithm}-baseline-{resolution}"
+echo "  - Pairwise (uses delta=0.0 for both):"
+echo "      Watermarked: pairwise-{resolution}"
+echo "      Baseline:    pairwise-baseline-{resolution}"
+echo ""
 
 # --- Iterate over all combinations ---
 for algo in "${ALGORITHMS[@]}"; do
+  for res in "${RESOLUTIONS[@]}"; do
 
-  # Determine valid deltas for this algorithm
-  if [[ $algo == "random" ]]; then
-    deltas=(2.0)  # Skip baseline (0.0) - we only need it as the comparison reference
-  elif [[ $algo == "pairwise" ]]; then
-    deltas=(0.0)
-  else
-    deltas=(2.0)
-  fi
+    # Pairwise uses delta=0.0, others use delta=2.0
+    if [[ $algo == "pairwise" ]]; then
+      DELTA=0.0
+    else
+      DELTA=2.0
+    fi
 
-  for delta in "${deltas[@]}"; do
-    for res in "${RESOLUTIONS[@]}"; do
+    JOB_NAME="attack_c2i_${algo}_d${DELTA}_${res}"
+    LOG_FILE="slurm_logs/attacks_c2i/${JOB_NAME}.log"
 
-      JOB_NAME="attack_c2i_${algo}_d${delta}_${res}"
-      LOG_FILE="slurm_logs/attacks_c2i/${JOB_NAME}.log"
-
-      echo "Submitting: ${JOB_NAME}"
-      sbatch --job-name=${JOB_NAME} \
-             --output=${LOG_FILE} \
-             --export=ALGORITHM=${algo},DELTA=${delta},RESOLUTION=${res} \
-             attack_val_c2i_job.sh
-    done
+    echo "Submitting: ${JOB_NAME}"
+    sbatch --job-name=${JOB_NAME} \
+           --output=${LOG_FILE} \
+           --export=ALGORITHM=${algo},DELTA=${DELTA},RESOLUTION=${res} \
+           attack_val_c2i_job.sh
   done
 
 done
@@ -49,9 +53,8 @@ echo ""
 echo "=============================================="
 echo "All C2I attack validation jobs submitted!"
 echo "=============================================="
-echo "Total algorithms: ${#ALGORITHMS[@]}"
-echo "Total resolutions: ${#RESOLUTIONS[@]}"
-echo "Each job will run all attack types internally"
+echo "Total jobs: $(( ${#ALGORITHMS[@]} * ${#RESOLUTIONS[@]} ))"
+echo "Each job runs all attack types internally"
 echo ""
 echo "Monitor with: squeue -u \$USER"
 echo "Logs: slurm_logs/attacks_c2i/"

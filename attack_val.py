@@ -450,7 +450,8 @@ if __name__ == "__main__":
         "--algorithm",
         type=str,
         default="pairwise",
-        help="Override algorithm type (otherwise read from JSON). Options: pairwise, random, clustering, spectral, spectral-clustering",
+        choices=["pairwise", "random", "clustering", "spectral", "spectral-clustering"],
+        help="Watermarking algorithm to evaluate. This determines which directories to compare (e.g., pairwise-512 vs pairwise-baseline-512)",
     )
     parser.add_argument("--WATERMARK-THRESHOLD", type=float, default=0.615)
     parser.add_argument("--target-image-size", type=int, default=512)
@@ -486,21 +487,23 @@ if __name__ == "__main__":
         help="Scale for random crop attack (0.0-1.0)",
     )
     parser.add_argument(
-        "--Watermarked-dir",
+        "--base-dir",
         type=str,
-        default="/cmlscratch/anirudhs/graph_watermark/images/t2i_experiments/random-delta2.0-512",
+        default="/cmlscratch/anirudhs/graph_watermark/images/t2i_experiments",
+        help="Base directory containing algorithm subdirectories",
     )
     parser.add_argument(
-        "--Not-Watermarked-dir",
-        type=str,
-        default="/cmlscratch/anirudhs/graph_watermark/images/t2i_experiments/random-baseline-512",
+        "--delta",
+        type=float,
+        default=2.0,
+        help="Delta value used for watermarked images (only used for non-pairwise algorithms)",
     )
     parser.add_argument("--distortion-seed", type=int, default=123)
     parser.add_argument(
         "--results-output",
         type=str,
-        default="attack_validation_results.json",
-        help="Path to save attack validation results as JSON",
+        default=None,
+        help="Path to save attack validation results as JSON. If not specified, will be auto-generated based on algorithm and attack type.",
     )
     parser.add_argument(
         "--fpr-threshold",
@@ -510,6 +513,14 @@ if __name__ == "__main__":
     )
 
     args, _ = parser.parse_known_args()
+
+    # Auto-generate results output filename if not specified
+    if args.results_output is None:
+        if args.algorithm == "pairwise":
+            args.results_output = f"attack_validation_{args.algorithm}_{args.chosen_attack}.json"
+        else:
+            args.results_output = f"attack_validation_{args.algorithm}_delta{args.delta}_{args.chosen_attack}.json"
+        print(f"Auto-generated results output filename: {args.results_output}")
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -580,9 +591,20 @@ if __name__ == "__main__":
     print(f"Codebook weights extracted (shape: {codebook_weights.shape})")
     #### Begin validation
 
+    # Construct directory paths based on algorithm
+    if args.algorithm == "pairwise":
+        watermarked_dir = os.path.join(args.base_dir, f"{args.algorithm}-{args.target_image_size}")
+    else:
+        watermarked_dir = os.path.join(args.base_dir, f"{args.algorithm}-delta{args.delta}-{args.target_image_size}")
+
+    baseline_dir = os.path.join(args.base_dir, f"{args.algorithm}-baseline-{args.target_image_size}")
+
+    print(f"Watermarked directory: {watermarked_dir}")
+    print(f"Baseline directory: {baseline_dir}")
+
     directories_to_process = {
-        args.Watermarked_dir: 1,  # Watermarked = Label 1
-        args.Not_Watermarked_dir: 0,  # Not Watermarked = Label 0
+        watermarked_dir: 1,  # Watermarked = Label 1
+        baseline_dir: 0,  # Not Watermarked = Label 0
     }
 
     all_true_labels = []
@@ -638,7 +660,14 @@ if __name__ == "__main__":
 
             try:
                 # Load assignment JSON to determine algorithm and green/red lists
-                assignment_data = load_assignment_json(image_path)
+                # For non-watermarked images, use the assignment from the watermarked image
+                if true_label == 0:
+                    # This is a non-watermarked image, load assignment from watermarked directory
+                    watermarked_image_path = os.path.join(watermarked_dir, filename)
+                    assignment_data = load_assignment_json(watermarked_image_path)
+                else:
+                    # This is a watermarked image, use its own assignment
+                    assignment_data = load_assignment_json(image_path)
 
                 if assignment_data is None:
                     print(f"Warning: No assignment data for {filename}. Skipping.")
@@ -856,8 +885,12 @@ if __name__ == "__main__":
 
         results = {
             "parameters": {
-                "watermarked_dir": args.Watermarked_dir,
-                "not_watermarked_dir": args.Not_Watermarked_dir,
+                "base_dir": args.base_dir,
+                "watermarked_dir": watermarked_dir,
+                "baseline_dir": baseline_dir,
+                "algorithm": args.algorithm,
+                "delta": args.delta,
+                "target_image_size": args.target_image_size,
                 "pvalue_threshold": args.pvalue_threshold,
                 "context_window_h": args.h,
                 "attack_type": args.chosen_attack,
@@ -865,7 +898,6 @@ if __name__ == "__main__":
                 "distortion_seed": args.distortion_seed,
                 "seed": args.seed,
                 "replacement_ratio": args.replacement_ratio,
-                "algorithm": args.algorithm,
                 "fpr_threshold_percent": args.fpr_threshold,
             },
             "summary": {
@@ -935,8 +967,12 @@ if __name__ == "__main__":
 
         results = {
             "parameters": {
-                "watermarked_dir": args.Watermarked_dir,
-                "not_watermarked_dir": args.Not_Watermarked_dir,
+                "base_dir": args.base_dir,
+                "watermarked_dir": watermarked_dir,
+                "baseline_dir": baseline_dir,
+                "algorithm": args.algorithm,
+                "delta": args.delta,
+                "target_image_size": args.target_image_size,
                 "pvalue_threshold": args.pvalue_threshold,
                 "context_window_h": args.h,
                 "attack_type": args.chosen_attack,
@@ -944,7 +980,6 @@ if __name__ == "__main__":
                 "distortion_seed": args.distortion_seed,
                 "seed": args.seed,
                 "replacement_ratio": args.replacement_ratio,
-                "algorithm": args.algorithm,
                 "fpr_threshold_percent": args.fpr_threshold,
             },
             "summary": {
